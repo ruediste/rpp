@@ -43,10 +43,10 @@
 #define GPIO_LEV(g)  (*(gpio+13) >> (g)) & 0x00000001
 
 /* GPIO <-> PIC connections */
-#define PIC_CLK    4	/* Output */
-#define PIC_DATA   7	/* Output */
-#define PIC_DATAIN 8	/* Input  */
-#define PIC_MCLR   9	/* Output */
+#define PIC_CLK    14	/* Output */
+#define PIC_DATA   15	/* Output */
+#define PIC_DATAIN 23	/* Input  */
+#define PIC_MCLR   18	/* Output */
 #define DELAY      40	/* microseconds */
 
 /* 8K program memory + configuration memory + eeprom data */
