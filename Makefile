@@ -3,8 +3,8 @@ CFLAGS = -Wall -O
 
 all: rpp
 
-rpp: rpp.c
-	$(CC) $(CFLAGS) rpp.c -o rpp
+rpp: rpp.cpp
+	$(CC) $(CFLAGS) rpp.cpp -o rpp -lstdc++
 
 clean:
 	rm -f rpp
