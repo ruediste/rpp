@@ -462,7 +462,7 @@ public:
 
 				if (hex->data[addr] != data)
 				{
-					fprintf(stderr, "Error: addr = 0x%04X, written = 0x%04X, read = 0x%04X\n",  addr, hex->data[addr],  data);
+					fprintf(stderr, "Error: addr = 0x%04X, written = 0x%04X, read = 0x%04X\n", addr, hex->data[addr], data);
 					exit(1);
 				}
 			}
@@ -474,13 +474,11 @@ public:
 	}
 };
 
-Pic16F54 pic16f54 = Pic16F54();
-
-Pic *picList[] = {&pic16f54, NULL};
+Pic *picList[] = {new Pic16F54(), NULL};
 
 void usage(void)
 {
-	fprintf(stderr,
+	fprintf(stdout,
 			"Usage: rpp [options]\n"
 			"       -h          print help\n"
 			"       -D          turn debug on\n"
@@ -495,12 +493,12 @@ void usage(void)
 			"Supported PICs (*=can autodetect):");
 
 	bool comma = false;
-	for (Pic **pic = picList; *pic == NULL; pic++)
+	for (Pic **pic = picList; *pic != NULL; pic++)
 	{
-		fprintf(stderr, "%s %s%s", comma ? "," : "", (*pic)->name, (*pic)->deviceId == 0 ? "" : "*");
+		fprintf(stdout, "%s %s%s", comma ? "," : "", (*pic)->name, (*pic)->deviceId == 0 ? "" : "*");
 		comma = true;
 	}
-	fprintf(stderr, "\n");
+	fprintf(stdout, "\n");
 }
 
 enum class Function
@@ -703,7 +701,7 @@ int main(int argc, char *argv[])
 
 	fprintf(stderr, "Raspberry Pi PIC Programmer, v0.1\n\n");
 
-	while ((opt = getopt(argc, argv, "hDi:o:rwes")) != -1)
+	while ((opt = getopt(argc, argv, "hDi:o:p:rwes")) != -1)
 	{
 		switch (opt)
 		{
@@ -787,9 +785,9 @@ int main(int argc, char *argv[])
 	else
 	{
 		// choose pic from list based on name in argument
-		for (Pic **tmp = picList; tmp == NULL; tmp++)
+		for (Pic **tmp = picList; *tmp != NULL; tmp++)
 		{
-			if (strcasecmp((*tmp)->name, picNameArg))
+			if (strcasecmp((*tmp)->name, picNameArg) == 0)
 			{
 				pic = *tmp;
 				break;
@@ -808,10 +806,11 @@ int main(int argc, char *argv[])
 	{
 	case Function::WRITE:
 	{
-		fprintf(stdout, "Writing PIC");
+
 		HexFile *file = read_inhx16(infile);
 		if (file == NULL)
 			exit(1);
+		fprintf(stdout, "Writing PIC");
 		pic->write(file);
 	}
 	default:
