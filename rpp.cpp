@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <time.h>
 #include <errno.h>
+#include <pigpio.h>
 
 #define DELAY 40 /* microseconds */
 
@@ -42,74 +43,29 @@ int mem_fd;
 /* GPIO registers address */
 volatile uint32_t *gpio;
 
-//  For Raspberry Pi 2 and Pi 3, change BCM2708_PERI_BASE to 0x3F000000 for the code to work.
-#define BCM2708_PERI_BASE 0x20000000
-#define GPIO_BASE (BCM2708_PERI_BASE + 0x200000) /* GPIO controller */
-#define BLOCK_SIZE (256)
-
-/* GPIO setup macros. Always use GPIO_IN(x) before using GPIO_OUT(x) or GPIO_ALT(x,y) */
-#define GPIO_IN(g) *(gpio + ((g) / 10)) &= ~(7 << (((g) % 10) * 3))
-#define GPIO_OUT(g) *(gpio + ((g) / 10)) |= (1 << (((g) % 10) * 3))
-#define GPIO_ALT(g, a) *(gpio + (((g) / 10))) |= (((a) <= 3 ? (a) + 4 : (a) == 4 ? 3 : 2) << (((g) % 10) * 3))
-
-#define _GPIO_SET(g) *(gpio + 7) = 1 << (g)	 /* sets   bit which are 1, ignores bit which are 0 */
-#define _GPIO_CLR(g) *(gpio + 10) = 1 << (g) /* clears bit which are 1, ignores bit which are 0 */
-#define _GPIO_LEV(g) (*(gpio + 13) >> (g)) & 0x00000001
-
 bool debug = false;
 
 /* Set up a memory regions to access GPIO */
 void setup_io()
 {
-	/* open /dev/mem */
-	mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
-	if (mem_fd == -1)
+	if (gpioInitialise() < 0)
 	{
-		perror("Cannot open /dev/mem");
+		fprintf(stderr, "Initialization of pigpio failed\n");
 		exit(1);
 	}
-
-	/* mmap GPIO */
-	gpio_map = mmap(NULL, BLOCK_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, GPIO_BASE);
-	if (gpio_map == MAP_FAILED)
-	{
-		perror("mmap() failed");
-		exit(1);
-	}
-
-	/* Always use volatile pointer! */
-	gpio = (volatile uint32_t *)gpio_map;
 }
 
 /* Release GPIO memory region */
 void close_io()
 {
-	int ret;
-
-	/* munmap GPIO */
-	ret = munmap(gpio_map, BLOCK_SIZE);
-	if (ret == -1)
-	{
-		perror("munmap() failed");
-		exit(1);
-	}
-
-	/* close /dev/mem */
-	ret = close(mem_fd);
-	if (ret == -1)
-	{
-		perror("Cannot close /dev/mem");
-		exit(1);
-	}
+	gpioTerminate();
 }
 
 class Pin
 {
-private:
+public:
 	int nr;
 	bool inverted;
-
-public:
 	Pin(int nr, bool inverted)
 	{
 		this->nr = nr;
@@ -119,16 +75,16 @@ public:
 	void set()
 	{
 		if (inverted)
-			_GPIO_CLR(nr);
+			gpioWrite(nr, 0);
 		else
-			_GPIO_SET(nr);
+			gpioWrite(nr, 1);
 	}
 	void clr()
 	{
 		if (inverted)
-			_GPIO_SET(nr);
+			gpioWrite(nr, 1);
 		else
-			_GPIO_CLR(nr);
+			gpioWrite(nr, 0);
 	}
 
 	void write(bool value)
@@ -141,19 +97,19 @@ public:
 	bool read()
 	{
 		if (inverted)
-			return !_GPIO_LEV(nr);
+			return !gpioRead(nr);
 		else
-			return _GPIO_LEV(nr);
+			return gpioRead(nr);
 	}
 
 	void modeIn()
 	{
-		GPIO_IN(nr);
+		gpioSetMode(nr, PI_INPUT);
 	}
 
 	void modeOut()
 	{
-		GPIO_OUT(nr);
+		gpioSetMode(nr, PI_OUTPUT);
 	}
 };
 
@@ -165,15 +121,15 @@ class Programmer
 private:
 public:
 	double sleepFactor = 1;
-	/* Pin clk = Pin(14, true);
+	Pin clk = Pin(14, true);
 	Pin data = Pin(15, true);
 	Pin dataIn = Pin(23, false);
-	Pin mclr = Pin(24, false); */
+	Pin mclr = Pin(24, false); 
 
-	Pin clk = Pin(8, true);
+	/*Pin clk = Pin(8, true);
 	Pin data = Pin(10, true);
 	Pin dataIn = Pin(16, false);
-	Pin mclr = Pin(18, false);
+	Pin mclr = Pin(18, false);*/
 
 	void setupPins()
 	{
@@ -293,7 +249,9 @@ public:
 		{
 			programmer->clk.set();
 			programmer->sleep(Tdly3);
+			
 			data |= (programmer->dataIn.read()) << i;
+
 			programmer->clk.clr();
 			programmer->sleep(Thld1);
 		}
@@ -410,7 +368,8 @@ private:
 	long Thld0 = US(5);
 	long Tera = MS(10);
 	long Treset = MS(10);
-	long Tprog;
+	long Tprog=MS(2);
+	long Tdis=US(100);
 	PicHelper helper;
 
 public:
@@ -458,6 +417,8 @@ public:
 				helper.loadData(hex->data[addr]);
 				helper.sendCmd(beginProgrammingCmd);
 				programmer->sleep(Tprog);
+				helper.sendCmd(endProgrammingCmd);
+				programmer->sleep(Tdis);
 
 				helper.sendCmd(readDataFromProgramMemoryCmd);
 				uint16_t data = helper.readData();
@@ -827,7 +788,7 @@ int main(int argc, char *argv[])
 			break;
 		case 'b':
 			function = Function::BLINK;
-			blinkPin=optarg;
+			blinkPin = optarg;
 			break;
 		default:
 			fprintf(stderr, "\n");
@@ -858,11 +819,11 @@ int main(int argc, char *argv[])
 		}
 
 		Pin *pin = NULL;
-		if (strcasecmp("mclr", blinkPin))
+		if (strcasecmp("mclr", blinkPin)==0)
 			pin = &programmer.mclr;
-		else if (strcasecmp("data", blinkPin))
+		else if (strcasecmp("data", blinkPin)==0)
 			pin = &programmer.data;
-		else if (strcasecmp("clk", blinkPin))
+		else if (strcasecmp("clk", blinkPin)==0)
 			pin = &programmer.clk;
 		else
 		{
@@ -870,11 +831,13 @@ int main(int argc, char *argv[])
 			exit(1);
 		}
 
+		fprintf(stdout, "Blinking Pin %s, pinNr: %i, inverted: %i\n", blinkPin, pin->nr, pin->inverted);
 		while (true)
 		{
 			pin->set();
 			fprintf(stdout, "Pin %s set to 1\n", blinkPin);
 			sleep(5);
+
 			pin->clr();
 			fprintf(stdout, "Pin %s set to 0\n", blinkPin);
 			sleep(5);
