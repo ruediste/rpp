@@ -165,10 +165,15 @@ class Programmer
 private:
 public:
 	double sleepFactor = 1;
-	Pin clk = Pin(14, true);
+	/* Pin clk = Pin(14, true);
 	Pin data = Pin(15, true);
 	Pin dataIn = Pin(23, false);
-	Pin mclr = Pin(24, false);
+	Pin mclr = Pin(24, false); */
+
+	Pin clk = Pin(8, true);
+	Pin data = Pin(10, true);
+	Pin dataIn = Pin(16, false);
+	Pin mclr = Pin(18, false);
 
 	void setupPins()
 	{
@@ -213,8 +218,8 @@ public:
 };
 
 #define NS(t) (t)
-#define US(t) NS(t * 1000)
-#define MS(t) US(t * 1000)
+#define US(t) NS(t * 1000L)
+#define MS(t) US(t * 1000L)
 
 class HexFile
 {
@@ -489,6 +494,7 @@ void usage(void)
 			"       -w          bulk erase and write chip\n"
 			"       -e          bulk erase chip\n"
 			"       -s          skip all-ones memory locations\n"
+			"       -b pin      blink a pin every 5s (pin: data, clk, mclr)\n"
 			"\n"
 			"Supported PICs (*=can autodetect):");
 
@@ -506,7 +512,8 @@ enum class Function
 	UNSPECIFIED,
 	WRITE,
 	ERASE,
-	READ
+	READ,
+	BLINK
 };
 
 /* Read a file in Intel HEX 16-bit format and return a pointer to the picmemory
@@ -519,12 +526,11 @@ struct HexFile *read_inhx16(char *infile)
 	size_t linelen;
 	int nread;
 
-	uint16_t i;
 	uint8_t start_code;
 	uint8_t byte_count;
+	uint16_t base_address = 0;
 	uint16_t address;
 	uint8_t record_type;
-	uint16_t data;
 	uint8_t checksum_calculated;
 	uint8_t checksum_read;
 
@@ -549,7 +555,7 @@ struct HexFile *read_inhx16(char *infile)
 		return NULL;
 	}
 
-	fprintf(stderr, "Reading hex file...\n");
+	fprintf(stdout, "Reading hex file...\n");
 
 	linenum = 0;
 	while (1)
@@ -563,7 +569,7 @@ struct HexFile *read_inhx16(char *infile)
 			if (debug)
 			{
 				fprintf(stderr, "  line %d (%zd bytes): '", linenum, linelen);
-				for (i = 0; i < linelen; i++)
+				for (unsigned int i = 0; i < linelen; i++)
 				{
 					if (line[i] == '\n')
 						fprintf(stderr, "\\n");
@@ -591,7 +597,7 @@ struct HexFile *read_inhx16(char *infile)
 				return NULL;
 			}
 			if (debug)
-				fprintf(stderr, "  byte_count  = 0x%02X\n", byte_count);
+				fprintf(stdout, "  byte_count  = 0x%02X\n", byte_count);
 
 			nread = sscanf(&line[3], "%4hx", &address);
 			if (nread != 1)
@@ -601,7 +607,7 @@ struct HexFile *read_inhx16(char *infile)
 				return NULL;
 			}
 			if (debug)
-				fprintf(stderr, "  address     = 0x%04X\n", address);
+				fprintf(stdout, "  address     = 0x%04X\n", address);
 
 			nread = sscanf(&line[7], "%2hhx", &record_type);
 			if (nread != 1)
@@ -611,12 +617,33 @@ struct HexFile *read_inhx16(char *infile)
 				return NULL;
 			}
 			if (debug)
-				fprintf(stderr, "  record_type = 0x%02X (%s)\n", record_type, record_type == 0 ? "data" : (record_type == 1 ? "EOF" : "Unknown"));
-			if (record_type != 0 && record_type != 1)
 			{
-				fprintf(stderr, "Error: unknown record type.\n");
-				delete pm;
-				return NULL;
+				const char *recordTypeStr;
+				switch (record_type)
+				{
+				case 0:
+					recordTypeStr = "Data";
+					break;
+				case 1:
+					recordTypeStr = "EOF";
+					break;
+				case 2:
+					recordTypeStr = "Extended Segment Address	";
+					break;
+				case 3:
+					recordTypeStr = "Start Segment Address";
+					break;
+				case 4:
+					recordTypeStr = "Extended Linear Address";
+					break;
+				case 5:
+					recordTypeStr = "Start Linear Address";
+					break;
+				default:
+					recordTypeStr = "Unknown";
+					break;
+				}
+				fprintf(stdout, "  record_type = 0x%02X (%s)\n", record_type, recordTypeStr);
 			}
 
 			checksum_calculated = byte_count;
@@ -624,40 +651,30 @@ struct HexFile *read_inhx16(char *infile)
 			checksum_calculated += address & 0xFF;
 			checksum_calculated += record_type;
 
-			for (i = 0; i < byte_count; i++)
+			uint8_t *data = new uint8_t[byte_count];
+
+			for (int i = 0; i < byte_count; i++)
 			{
-				nread = sscanf(&line[9 + 4 * i], "%4hx", &data);
+				nread = sscanf(&line[9 + 2 * i], "%2hhx", &data[i]);
 				if (nread != 1)
 				{
-					fprintf(stderr, "Error: cannot read data.\n");
+					fprintf(stdout, "Error: cannot read data.\n");
+					delete data;
 					delete pm;
 					return NULL;
 				}
 				if (debug)
-					fprintf(stderr, "  data        = 0x%04X\n", data);
-				checksum_calculated += (data >> 8) & 0xFF;
-				checksum_calculated += data & 0xFF;
-
-				if (address + i < 0x2000)
-				{
-					pm->program_memory_used_cells += 1;
-					pm->program_memory_max_used_address = address + i;
-				}
-				else if (0x2000 <= address + i && address + i < 0x2008)
-					pm->has_configuration_data = 1;
-				else if (address + i >= 0x2100)
-					pm->has_eeprom_data = 1;
-
-				pm->data[address + i] = data;
-				pm->filled[address + i] = 1;
+					fprintf(stdout, "  data        = 0x%02X\n", data[i]);
+				checksum_calculated += data[i];
 			}
 
 			checksum_calculated = (checksum_calculated ^ 0xFF) + 1;
 
-			nread = sscanf(&line[9 + 4 * i], "%2hhx", &checksum_read);
+			nread = sscanf(&line[9 + 2 * byte_count], "%2hhx", &checksum_read);
 			if (nread != 1)
 			{
 				fprintf(stderr, "Error: cannot read checksum.\n");
+				delete data;
 				delete pm;
 				return NULL;
 			}
@@ -667,15 +684,92 @@ struct HexFile *read_inhx16(char *infile)
 			if (checksum_calculated != checksum_read)
 			{
 				fprintf(stderr, "Error: checksum does not match.\n");
+				delete data;
 				delete pm;
 				return NULL;
 			}
 
+			switch (record_type)
+			{
+			case 0:
+			{
+				// data
+				address += base_address;
+				if (byte_count % 2 != 0)
+				{
+					fprintf(stderr, "Error expected even number of bytes, but got %u\n", byte_count);
+					delete data;
+					delete pm;
+					return NULL;
+				}
+
+				for (int i = 0; i < byte_count / 2; i++)
+				{
+					if (address + i < 0x2000)
+					{
+						pm->program_memory_used_cells += 1;
+						pm->program_memory_max_used_address = address + i;
+					}
+					else if (0x2000 <= address + i && address + i < 0x2008)
+						pm->has_configuration_data = 1;
+					else if (address + i >= 0x2100)
+						pm->has_eeprom_data = 1;
+
+					pm->data[address + i] = (data[2 * i] << 8) + (data[2 * i + 1]);
+					pm->filled[address + i] = 1;
+				}
+			}
+			break;
+			case 1:
+			{
+				//EOF
+				fclose(fp);
+				return pm;
+			}
+			break;
+			case 2:
+			{
+				// Extended Segment Address
+				base_address = ((data[0] << 8) + data[1]) << 4;
+				if (debug)
+					fprintf(stdout, "base address set to 0x%04X\n", base_address);
+			}
+			break;
+			case 3:
+			{
+				// Start Segment Address, ignored
+				fprintf(stdout, "ignoring Start Segment Address record");
+			}
+			break;
+			case 4:
+			{
+				// Extended Linear Address, ignored
+				base_address = 0;
+				for (int i = 0; i < byte_count; i++)
+				{
+					base_address = base_address << 8;
+					base_address += data[i];
+				}
+				if (debug)
+					fprintf(stdout, "base address set to 0x%04X\n", base_address);
+			}
+			break;
+			case 5:
+			{
+				//Start Linear Address, ignored
+				fprintf(stdout, "ignoring Start Linear Address record");
+			}
+			break;
+			default:
+			{
+				fprintf(stderr, "Error: unknown record type 0x%02X.\n", record_type);
+				delete pm;
+				return NULL;
+			}
+			break;
+			}
 			if (debug)
 				fprintf(stderr, "\n");
-
-			if (record_type == 1)
-				break;
 		}
 		else
 		{
@@ -684,10 +778,7 @@ struct HexFile *read_inhx16(char *infile)
 			return NULL;
 		}
 	}
-
-	fclose(fp);
-
-	return pm;
+	return NULL;
 }
 
 int main(int argc, char *argv[])
@@ -696,12 +787,13 @@ int main(int argc, char *argv[])
 	char *infile = NULL;
 	const char *outfile = "ofile.hex";
 	char *picNameArg = NULL;
+	const char *blinkPin = NULL;
 
 	Function function = Function::UNSPECIFIED;
 
 	fprintf(stderr, "Raspberry Pi PIC Programmer, v0.1\n\n");
 
-	while ((opt = getopt(argc, argv, "hDi:o:p:rwes")) != -1)
+	while ((opt = getopt(argc, argv, "hDi:o:p:b:rwes")) != -1)
 	{
 		switch (opt)
 		{
@@ -733,6 +825,10 @@ int main(int argc, char *argv[])
 		case 's':
 			skipones = 1;
 			break;
+		case 'b':
+			function = Function::BLINK;
+			blinkPin=optarg;
+			break;
 		default:
 			fprintf(stderr, "\n");
 			usage();
@@ -752,6 +848,38 @@ int main(int argc, char *argv[])
 	// setup programmer
 	Programmer programmer = Programmer();
 	programmer.setupPins();
+
+	if (function == Function::BLINK)
+	{
+		if (!blinkPin)
+		{
+			fprintf(stderr, "Please specify an blink pin for the -b function.\n");
+			exit(1);
+		}
+
+		Pin *pin = NULL;
+		if (strcasecmp("mclr", blinkPin))
+			pin = &programmer.mclr;
+		else if (strcasecmp("data", blinkPin))
+			pin = &programmer.data;
+		else if (strcasecmp("clk", blinkPin))
+			pin = &programmer.clk;
+		else
+		{
+			fprintf(stderr, "Pin %s not supported for blinking.\n", blinkPin);
+			exit(1);
+		}
+
+		while (true)
+		{
+			pin->set();
+			fprintf(stdout, "Pin %s set to 1\n", blinkPin);
+			sleep(5);
+			pin->clr();
+			fprintf(stdout, "Pin %s set to 0\n", blinkPin);
+			sleep(5);
+		}
+	}
 
 	// determine pic device to use
 	Pic *pic = NULL;
@@ -810,12 +938,18 @@ int main(int argc, char *argv[])
 		HexFile *file = read_inhx16(infile);
 		if (file == NULL)
 			exit(1);
-		fprintf(stdout, "Writing PIC");
+		fprintf(stdout, "Writing PIC\n");
 		pic->write(file);
+	}
+	case Function::UNSPECIFIED:
+	{
+		fprintf(stderr, "Please specify function \n");
+		exit(1);
 	}
 	default:
 	{
-		fprintf(stderr, "Please select a function");
+		fprintf(stderr, "Function not supported\n");
+		exit(1);
 	}
 	}
 	// close GPIO access
