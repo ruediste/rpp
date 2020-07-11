@@ -31,9 +31,12 @@
 #include <algorithm>
 #include <time.h>
 #include <errno.h>
-#include <pigpio.h>
-
-#define DELAY 40 /* microseconds */
+#include "pigpio.h"
+#include <iostream>
+#include <fstream>
+#include <ctime>
+#include <ratio>
+#include <chrono>
 
 /* 8K program memory + configuration memory + eeprom data */
 #define PICMEMSIZE (0x2100 + 0xFF)
@@ -61,13 +64,22 @@ void close_io()
 	gpioTerminate();
 }
 
+class PinStateWriter
+{
+public:
+	virtual void writePinState() = 0;
+};
+
 class Pin
 {
 public:
+	PinStateWriter *pinStateWriter;
 	int nr;
 	bool inverted;
-	Pin(int nr, bool inverted)
+	bool state;
+	Pin(PinStateWriter *pinStateWriter, int nr, bool inverted)
 	{
+		this->pinStateWriter = pinStateWriter;
 		this->nr = nr;
 		this->inverted = inverted;
 	}
@@ -78,13 +90,18 @@ public:
 			gpioWrite(nr, 0);
 		else
 			gpioWrite(nr, 1);
+		state = true;
+		pinStateWriter->writePinState();
 	}
 	void clr()
 	{
+
 		if (inverted)
 			gpioWrite(nr, 1);
 		else
 			gpioWrite(nr, 0);
+		state = false;
+		pinStateWriter->writePinState();
 	}
 
 	void write(bool value)
@@ -93,13 +110,18 @@ public:
 			set();
 		else
 			clr();
+		state = value;
+		pinStateWriter->writePinState();
 	}
 	bool read()
 	{
 		if (inverted)
-			return !gpioRead(nr);
+			state = !gpioRead(nr);
 		else
-			return gpioRead(nr);
+			state = gpioRead(nr);
+
+		pinStateWriter->writePinState();
+		return state;
 	}
 
 	void modeIn()
@@ -113,25 +135,42 @@ public:
 	}
 };
 
+/* macro for ns for consistency*/
+#define NS(t) (t)
+
+/* convert us to ns */
+#define US(t) NS(t * 1000)
+
+/* Convert ms to ns*/
+#define MS(t) US(t * 1000)
+
 /*
 The programmer knows how to talk to the physical pic. It can set/clear the input pins and read the data
 */
-class Programmer
+class Programmer : public PinStateWriter
 {
 private:
 public:
-	double sleepFactor = 1;
-	Pin clk = Pin(14, true);
-	Pin data = Pin(15, true);
-	Pin dataIn = Pin(23, false);
-	Pin mclr = Pin(24, false); 
+
+	std::ofstream pinLog;
+	std::chrono::high_resolution_clock::time_point begin;
+
+	double sleepFactor = 2;
+	long sleepOffset = MS(1);
+
+	bool logPins;
+
+	Pin clk = Pin(this, 14, true);
+	Pin data = Pin(this, 15, true);
+	Pin dataIn = Pin(this, 23, false);
+	Pin mclr = Pin(this, 24, false);
 
 	/*Pin clk = Pin(8, true);
 	Pin data = Pin(10, true);
 	Pin dataIn = Pin(16, false);
 	Pin mclr = Pin(18, false);*/
 
-	void setupPins()
+	void setup()
 	{
 		/* Configure GPIOs, must use GPIO_IN before we can use GPIO_OUT*/
 		clk.modeIn();
@@ -150,7 +189,22 @@ public:
 		dataIn.clr();
 		mclr.clr();
 
-		usleep(DELAY);
+		sleep(MS(100));
+
+		if (logPins)
+		{
+			begin = std::chrono::high_resolution_clock::now();
+			pinLog.open("pins.log", std::ios::out | std::ios::trunc);
+			pinLog << "time, clk, data, datain, mclr\n";
+		}
+	}
+
+	void close()
+	{
+		if (logPins)
+		{
+			pinLog.close();
+		}
 	}
 
 	void sleep(long nseconds)
@@ -171,11 +225,16 @@ public:
 			exit(1);
 		}
 	}
-};
 
-#define NS(t) (t)
-#define US(t) NS(t * 1000L)
-#define MS(t) US(t * 1000L)
+	void writePinState()
+	{
+		if (logPins){
+			auto now = std::chrono::high_resolution_clock::now();
+			pinLog<<std::chrono::duration_cast<std::chrono::nanoseconds>(now-begin).count()<<" ,"<<clk.state<<" ,"<<data.state<<" ,"<<dataIn.state<<" ,"<<mclr.state<<"\n";
+			pinLog.flush();
+		}
+	}
+};
 
 class HexFile
 {
@@ -249,7 +308,7 @@ public:
 		{
 			programmer->clk.set();
 			programmer->sleep(Tdly3);
-			
+
 			data |= (programmer->dataIn.read()) << i;
 
 			programmer->clk.clr();
@@ -341,7 +400,7 @@ public:
 		uint16_t data;
 
 		programmer->mclr.set(); /* Enter Program/Verify Mode */
-		usleep(DELAY);
+		programmer->sleep(MS(100));
 
 		helper.sendCmd(loadConfigurationCmd);
 		helper.loadData(0x0000);
@@ -351,7 +410,7 @@ public:
 		data = helper.readData();
 
 		programmer->mclr.clr(); /* Exit Program/Verify Mode */
-		usleep(DELAY);
+		programmer->sleep(MS(100));
 		return data;
 	}
 };
@@ -368,8 +427,8 @@ private:
 	long Thld0 = US(5);
 	long Tera = MS(10);
 	long Treset = MS(10);
-	long Tprog=MS(2);
-	long Tdis=US(100);
+	long Tprog = MS(2);
+	long Tdis = US(100);
 	PicHelper helper;
 
 public:
@@ -441,32 +500,6 @@ public:
 };
 
 Pic *picList[] = {new Pic16F54(), NULL};
-
-void usage(void)
-{
-	fprintf(stdout,
-			"Usage: rpp [options]\n"
-			"       -h          print help\n"
-			"       -D          turn debug on\n"
-			"       -p picName  choose pic version\n"
-			"       -i file     input file\n"
-			"       -o file     output file (ofile.hex)\n"
-			"       -r          read chip\n"
-			"       -w          bulk erase and write chip\n"
-			"       -e          bulk erase chip\n"
-			"       -s          skip all-ones memory locations\n"
-			"       -b pin      blink a pin every 5s (pin: data, clk, mclr)\n"
-			"\n"
-			"Supported PICs (*=can autodetect):");
-
-	bool comma = false;
-	for (Pic **pic = picList; *pic != NULL; pic++)
-	{
-		fprintf(stdout, "%s %s%s", comma ? "," : "", (*pic)->name, (*pic)->deviceId == 0 ? "" : "*");
-		comma = true;
-	}
-	fprintf(stdout, "\n");
-}
 
 enum class Function
 {
@@ -742,6 +775,32 @@ struct HexFile *read_inhx16(char *infile)
 	return NULL;
 }
 
+void usage(void)
+{
+	fprintf(stdout,
+			"Usage: rpp [options]\n"
+			"       -h          print help\n"
+			"       -D          turn debug on\n"
+			"       -p picName  choose pic version\n"
+			"       -o file     output file (ofile.hex)\n"
+			"       -r          read chip\n"
+			"       -w file     bulk erase and write chip\n"
+			"       -e          bulk erase chip\n"
+			"       -s          skip all-ones memory locations\n"
+			"       -b pin      blink a pin every 5s (pin: data, clk, mclr)\n"
+			"       -l          log pin states to pins.log\n"
+			"\n"
+			"Supported PICs (*=can autodetect):");
+
+	bool comma = false;
+	for (Pic **pic = picList; *pic != NULL; pic++)
+	{
+		fprintf(stdout, "%s %s%s", comma ? "," : "", (*pic)->name, (*pic)->deviceId == 0 ? "" : "*");
+		comma = true;
+	}
+	fprintf(stdout, "\n");
+}
+
 int main(int argc, char *argv[])
 {
 	int opt, skipones = 0;
@@ -754,7 +813,8 @@ int main(int argc, char *argv[])
 
 	fprintf(stderr, "Raspberry Pi PIC Programmer, v0.1\n\n");
 
-	while ((opt = getopt(argc, argv, "hDi:o:p:b:rwes")) != -1)
+	Programmer programmer = Programmer();
+	while ((opt = getopt(argc, argv, "hDo:p:b:rw:esl")) != -1)
 	{
 		switch (opt)
 		{
@@ -768,9 +828,6 @@ int main(int argc, char *argv[])
 		case 'p':
 			picNameArg = optarg;
 			break;
-		case 'i':
-			infile = optarg;
-			break;
 		case 'o':
 			outfile = optarg;
 			break;
@@ -779,6 +836,7 @@ int main(int argc, char *argv[])
 			break;
 		case 'w':
 			function = Function::WRITE;
+			infile = optarg;
 			break;
 		case 'e':
 			function = Function::ERASE;
@@ -789,6 +847,9 @@ int main(int argc, char *argv[])
 		case 'b':
 			function = Function::BLINK;
 			blinkPin = optarg;
+			break;
+		case 'l':
+			programmer.logPins = true;
 			break;
 		default:
 			fprintf(stderr, "\n");
@@ -807,8 +868,7 @@ int main(int argc, char *argv[])
 	setup_io();
 
 	// setup programmer
-	Programmer programmer = Programmer();
-	programmer.setupPins();
+	programmer.setup();
 
 	if (function == Function::BLINK)
 	{
@@ -819,11 +879,11 @@ int main(int argc, char *argv[])
 		}
 
 		Pin *pin = NULL;
-		if (strcasecmp("mclr", blinkPin)==0)
+		if (strcasecmp("mclr", blinkPin) == 0)
 			pin = &programmer.mclr;
-		else if (strcasecmp("data", blinkPin)==0)
+		else if (strcasecmp("data", blinkPin) == 0)
 			pin = &programmer.data;
-		else if (strcasecmp("clk", blinkPin)==0)
+		else if (strcasecmp("clk", blinkPin) == 0)
 			pin = &programmer.clk;
 		else
 		{
@@ -917,6 +977,8 @@ int main(int argc, char *argv[])
 	}
 	// close GPIO access
 	close_io();
+
+	programmer.close();
 
 	return 0;
 }
